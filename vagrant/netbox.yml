@@ -1,0 +1,120 @@
+---
+
+- name: deploy netbox
+  hosts: all
+  become: yes
+
+  tasks:
+
+    - name: repos
+      yum:
+        name: "{{item}}"
+        state: present
+      with_items:
+        - epel-release
+        - https://download.postgresql.org/pub/repos/yum/9.6/redhat/rhel-7-x86_64/pgdg-centos96-9.6-3.noarch.rpm
+
+    - name: packages
+      yum:
+        name: "{{item}}"
+        state: present
+      with_items:
+        - git
+        - python34
+        - python34-pip
+        - python-pip
+        - supervisor
+        - nginx
+        - postgresql96
+        - postgresql96-server
+        - postgresql96-devel
+      register: packages
+
+    - name: install ansible module reqs
+      pip:
+        name: "{{item}}"
+        state: present
+        executable: pip2
+      with_items:
+        - psycopg2
+        - pexpect
+
+    - name: init postgres
+      command: /usr/pgsql-9.6/bin/postgresql96-setup initdb
+      when: packages.changed
+
+    - name: copy pg_hba.conf
+      copy:
+        src: pg_hba.conf
+        dest: /var/lib/pgsql/9.6/data/pg_hba.conf
+
+    - name: start pgsql
+      service:
+        name:  postgresql-9.6
+        state: started
+        enabled: yes
+        use: service
+
+    - name: create db
+      postgresql_db:
+        name: netbox
+        state: present
+      become_user: postgres
+
+    - name: create db user
+      postgresql_user:
+        db: netbox
+        name: netbox
+        password: testpass1234
+        priv: "ALL"
+      become_user: postgres
+
+    - name: git clone netbox
+      git:
+        repo: https://github.com/digitalocean/netbox.git
+        dest: /opt/netbox/
+
+    - name: own netbox media folder
+      file:
+        path: /opt/netbox/netbox/media/
+        owner: nginx  
+        group: nginx
+        state: directory
+        recurse: yes
+
+    - name: copy nginx config
+      copy:
+        src: netbox.conf
+        dest: /etc/nginx/conf.d/
+
+    - name: install py3 deps
+      pip:
+        requirements: /opt/netbox/requirements.txt
+        executable: pip3
+
+    - name: copy configuration
+      copy:
+        src: configuration.py
+        dest: /opt/netbox/netbox/netbox/configuration.py
+
+    - name: migrate schema
+      command: python3 /opt/netbox/netbox/manage.py migrate
+      when: packages.changed
+
+    - name: create super user
+      expect:
+        command: python3 /opt/netbox/netbox/manage.py createsuperuser
+        responses:
+          Username: admin
+          Email: root
+          Password: testpass1234
+          Password (again): testpass1234
+      when: packages.changed
+
+    - name: collect static
+      command: python3 /opt/netbox/netbox/manage.py collectstatic --no-input
+      when: packages.changed
+
+    - name: load init data
+      command: python3 /opt/netbox/netbox/manage.py loaddata initial_data
+      when: packages.changed
